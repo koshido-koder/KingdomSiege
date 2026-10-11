@@ -201,9 +201,42 @@ class Game extends View {
         new AlertDialog.Builder(getContext()).setTitle("Подключиться к другу").setMessage("Сначала подключитесь к точке доступа друга, затем введите IP его телефона.").setView(field)
             .setNegativeButton("Отмена", null).setPositiveButton("Подключиться", (d,w) -> connectLan(field.getText().toString())).show();
     }
+    String getLanIp() {
+        try {
+            java.util.Enumeration<java.net.NetworkInterface> interfaces =
+                    java.net.NetworkInterface.getNetworkInterfaces();
+            while (interfaces != null && interfaces.hasMoreElements()) {
+                java.net.NetworkInterface ni = interfaces.nextElement();
+                if (!ni.isUp() || ni.isLoopback()) continue;
+
+                java.util.Enumeration<java.net.InetAddress> addresses = ni.getInetAddresses();
+                while (addresses.hasMoreElements()) {
+                    java.net.InetAddress a = addresses.nextElement();
+                    if (a instanceof java.net.Inet4Address && !a.isLoopbackAddress()
+                            && !a.isLinkLocalAddress()) {
+                        String ip = a.getHostAddress();
+                        if (ip.startsWith("192.168.") || ip.startsWith("10.")
+                                || ip.startsWith("172.")) return ip;
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        return "Не удалось определить IP";
+    }
+
     void showLanHostDialog() {
-        new AlertDialog.Builder(getContext()).setTitle("Создать LAN-комнату").setMessage("1. Включите точку доступа на этом телефоне.\n2. Друг подключается к ней.\n3. Нажмите «Создать комнату».\nПорт: " + LAN_PORT)
-            .setNegativeButton("Отмена", null).setPositiveButton("Создать", (d,w) -> hostLan()).show();
+        String ip = getLanIp();
+        String info = "1. Включите точку доступа на этом телефоне.\n"
+                + "2. Друг подключается к ней.\n"
+                + "3. На втором телефоне введите IP и порт.\n\n"
+                + "IP этого телефона: " + ip + "\n"
+                + "Порт: " + LAN_PORT + "\n"
+                + "Адрес: " + ip + ":" + LAN_PORT
+                + "\n\nЕсли IP не совпадает с адресом точки доступа, проверьте его в настройках сети.";
+        new AlertDialog.Builder(getContext()).setTitle("Создать LAN-комнату")
+            .setMessage(info)
+            .setNegativeButton("Отмена", null)
+            .setPositiveButton("Создать", (d,w) -> hostLan()).show();
     }
 
     static final class FloatText {
