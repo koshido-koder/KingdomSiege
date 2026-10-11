@@ -528,8 +528,9 @@ class Game extends View {
 
     @Override
     protected void onDetachedFromWindow() {
+        closeLan();
         super.onDetachedFromWindow();
-        audio.release();
+        if (audio != null) audio.release();
     }
 
     // ---------- главное меню (как лобби на картинке) ----------
@@ -922,7 +923,6 @@ class Game extends View {
     }
 
     // ================= касания =================
-    @Override protected void onDetachedFromWindow() { closeLan(); super.onDetachedFromWindow(); }
 
     @Override
     public boolean onTouchEvent(MotionEvent e) {
