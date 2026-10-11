@@ -1,6 +1,11 @@
 package com.example.kingdomsiege;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.widget.EditText;
+import android.text.InputType;
+import android.os.Handler;
+import android.os.Looper;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.res.AssetFileDescriptor;
@@ -24,6 +29,12 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.InetAddress;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.io.PrintWriter;
 
 public class MainActivity extends Activity {
     @Override
@@ -95,7 +106,7 @@ final class Audio {
 
 class Game extends View {
     // сцены
-    static final int MENU = 0, MAP = 1, KINGDOM = 2, COLLECTION = 3, SETTINGS = 4, BATTLE = 5, RESULT = 6, REWARDS = 7;
+    static final int MENU = 0, MAP = 1, KINGDOM = 2, COLLECTION = 3, SETTINGS = 4, BATTLE = 5, RESULT = 6, REWARDS = 7, LAN = 8;
 
     static final int LANES = 5, COLS = 14, MAX_MANA = 15, START_MANA = 5, STAGES = 10, KINGDOMS = 50, MAX_STARS_LEVEL = 2000;
     static final int DRAGON = 4;
@@ -149,6 +160,51 @@ class Game extends View {
     final List<Particle> particles = new ArrayList<>();
     int shake = 0, flash = 0;
     Audio audio;
+    static final int LAN_PORT = 47821;
+    volatile Socket lanSocket; volatile ServerSocket lanServer; volatile PrintWriter lanOut;
+    volatile boolean lanConnected = false;
+    volatile String lanStatus = "Выберите роль игрока";
+    final Handler uiHandler = new Handler(Looper.getMainLooper());
+    Thread lanThread;
+    void lanStatus(String value) { uiHandler.post(() -> { lanStatus = value; invalidate(); }); }
+    void hostLan() {
+        closeLan(); lanStatus = "Открываем комнату...";
+        lanThread = new Thread(() -> { try {
+            lanServer = new ServerSocket(LAN_PORT, 1, InetAddress.getByName("0.0.0.0"));
+            lanStatus("Комната открыта. Ожидание друга...");
+            attachLan(lanServer.accept());
+        } catch (Exception ex) { lanStatus("Не удалось открыть комнату. Проверьте Wi-Fi."); } }, "KS-LAN-host");
+        lanThread.setDaemon(true); lanThread.start();
+    }
+    void connectLan(String ip) {
+        closeLan(); lanStatus = "Подключаемся...";
+        lanThread = new Thread(() -> { try { Socket s = new Socket(); s.connect(new java.net.InetSocketAddress(ip.trim(), LAN_PORT), 7000); attachLan(s); }
+            catch (Exception ex) { lanStatus("Нет соединения. Проверьте IP и точку доступа."); } }, "KS-LAN-client");
+        lanThread.setDaemon(true); lanThread.start();
+    }
+    void attachLan(Socket socket) throws IOException {
+        lanSocket = socket; lanOut = new PrintWriter(socket.getOutputStream(), true); lanConnected = true;
+        lanStatus("СОЕДИНЕНО · локальная сеть готова");
+        lanThread = new Thread(() -> { try (BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream(), "UTF-8"))) {
+            String line; while ((line = in.readLine()) != null) { final String msg = line;
+                if ("PING".equals(msg)) sendLan("PONG");
+                else if ("PONG".equals(msg)) lanStatus("СОЕДИНЕНО · связь стабильна");
+                else if ("START".equals(msg)) lanStatus("Друг отправил сигнал начала боя");
+            }
+        } catch (Exception ignored) {} lanConnected = false; lanStatus("Соединение закрыто"); }, "KS-LAN-listener");
+        lanThread.setDaemon(true); lanThread.start();
+    }
+    void sendLan(String msg) { PrintWriter out = lanOut; if (lanConnected && out != null) { out.println(msg); out.flush(); } }
+    void closeLan() { lanConnected = false; lanOut = null; try { if (lanSocket != null) lanSocket.close(); } catch (Exception ignored) {} try { if (lanServer != null) lanServer.close(); } catch (Exception ignored) {} lanSocket = null; lanServer = null; }
+    void showLanConnectDialog() {
+        EditText field = new EditText(getContext()); field.setSingleLine(true); field.setInputType(InputType.TYPE_CLASS_TEXT); field.setHint("IP телефона-хоста");
+        new AlertDialog.Builder(getContext()).setTitle("Подключиться к другу").setMessage("Сначала подключитесь к точке доступа друга, затем введите IP его телефона.").setView(field)
+            .setNegativeButton("Отмена", null).setPositiveButton("Подключиться", (d,w) -> connectLan(field.getText().toString())).show();
+    }
+    void showLanHostDialog() {
+        new AlertDialog.Builder(getContext()).setTitle("Создать LAN-комнату").setMessage("1. Включите точку доступа на этом телефоне.\n2. Друг подключается к ней.\n3. Нажмите «Создать комнату».\nПорт: " + LAN_PORT)
+            .setNegativeButton("Отмена", null).setPositiveButton("Создать", (d,w) -> hostLan()).show();
+    }
 
     static final class FloatText {
         float x, y; String s; int color; int life;
@@ -426,6 +482,7 @@ class Game extends View {
             case COLLECTION: drawCollection(c); break;
             case SETTINGS: drawSettings(c); break;
             case REWARDS: drawRewards(c); break;
+            case LAN: drawLan(c); break;
             case BATTLE: drawBattle(c); break;
             default: drawResult(c); break;
         }
@@ -476,11 +533,11 @@ class Game extends View {
     }
 
     // ---------- главное меню (как лобби на картинке) ----------
-    static final String[] MENU_LABELS = {"Играть (карта мира)", "Продолжить: уровень ", "Коллекция карт", "Награды и задания", "Настройки"};
+    static final String[] MENU_LABELS = {"Играть (карта мира)", "Продолжить: уровень ", "Коллекция карт", "Награды и задания", "Настройки", "Локальный бой с другом"};
 
     RectF menuBtn(int i) {
-        float top = 0.42f + i * 0.095f;
-        return fr(0.10f, top, 0.90f, top + 0.075f);
+        float top = 0.34f + i * 0.092f;
+        return fr(0.10f, top, 0.90f, top + 0.070f);
     }
 
     void drawMenu(Canvas c) {
@@ -661,6 +718,18 @@ class Game extends View {
                     claimedAchievements[i] ? Color.rgb(55, 65, 70) : (totalWins >= achievementTarget(i) ? Color.rgb(125, 90, 25) : Color.rgb(45, 55, 80)));
         }
         text(c, "Бонус доступен раз в календарный день", w / 2f, h * 0.93f, h * 0.02f, Color.LTGRAY, Paint.Align.CENTER);
+    }
+
+    void drawLan(Canvas c) {
+        float w=getWidth(), h=getHeight(); drawCover(c,"lobby_bg",180); dim(c,205); backButton(c);
+        text(c,"ЛОКАЛЬНЫЙ БОЙ С ДРУГОМ",w/2,h*.18f,h*.038f,Color.rgb(255,215,110),Paint.Align.CENTER);
+        text(c,"Без интернета · через одну точку доступа Wi-Fi",w/2,h*.25f,h*.024f,Color.WHITE,Paint.Align.CENTER);
+        button(c,fr(.18f,.34f,.82f,.44f),"Создать комнату",Color.rgb(45,125,75));
+        button(c,fr(.18f,.47f,.82f,.56f),"Подключиться по IP",Color.rgb(45,90,155));
+        button(c,fr(.18f,.59f,.82f,.67f),"Проверить связь",Color.rgb(110,80,155));
+        button(c,fr(.18f,.70f,.82f,.78f),"Отправить сигнал старта",Color.rgb(170,105,30));
+        text(c,lanStatus,w/2,h*.86f,h*.022f,lanConnected?Color.GREEN:Color.LTGRAY,Paint.Align.CENTER);
+        text(c,"LAN-комната обменивается сигналами; синхронизация всех игровых ходов пока не реализована.",w/2,h*.95f,h*.016f,Color.LTGRAY,Paint.Align.CENTER);
     }
 
     // ---------- настройки ----------
@@ -853,6 +922,8 @@ class Game extends View {
     }
 
     // ================= касания =================
+    @Override protected void onDetachedFromWindow() { closeLan(); super.onDetachedFromWindow(); }
+
     @Override
     public boolean onTouchEvent(MotionEvent e) {
         float x = e.getX(), y = e.getY();
@@ -885,7 +956,8 @@ class Game extends View {
                         else if (i == 1) startBattle(unlocked);
                         else if (i == 2) scene = COLLECTION;
                         else if (i == 3) scene = REWARDS;
-                        else scene = SETTINGS;
+                        else if (i == 4) scene = SETTINGS;
+                        else scene = LAN;
                         return;
                     }
                 }
@@ -912,6 +984,13 @@ class Game extends View {
                 if (backBtn().contains(x, y)) { scene = MENU; return; }
                 for (int i = 0; i < 5; i++) if (collUnit(i).contains(x, y)) { buyUpgrade(i); return; }
                 if (castleBtn().contains(x, y)) buyUpgrade(5);
+                break;
+            case LAN:
+                if (backBtn().contains(x,y)) { closeLan(); scene=MENU; return; }
+                if (fr(.18f,.34f,.82f,.44f).contains(x,y)) showLanHostDialog();
+                else if (fr(.18f,.47f,.82f,.56f).contains(x,y)) showLanConnectDialog();
+                else if (fr(.18f,.59f,.82f,.67f).contains(x,y)) sendLan("PING");
+                else if (fr(.18f,.70f,.82f,.78f).contains(x,y)) { if (lanConnected) { sendLan("START"); lanStatus("Сигнал старта отправлен"); } else lanStatus("Сначала подключите друга"); }
                 break;
             case SETTINGS:
                 if (backBtn().contains(x, y)) { scene = MENU; return; }
