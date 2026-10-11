@@ -170,10 +170,12 @@ class Game extends View {
 
     void autoTurn() {
         if (scene != BATTLE || !auto) return;
+        // Автобой обновляет и игровую логику, и экран сам, без ручных нажатий.
         int guard = 0;
-        while (guard++ < 10 && autoPlayOne()) { }
-        endTurn();
-        scheduleAuto(700);
+        while (guard++ < 6 && scene == BATTLE && autoPlayOne()) { }
+        if (scene == BATTLE) endTurn();
+        postInvalidate();
+        if (scene == BATTLE && auto) scheduleAuto(900);
     }
 
     int enemyCountInLane(int lane) {
@@ -975,23 +977,37 @@ class Game extends View {
     void startBattle(int level) {
         bLevel = level;
         bBoss = level % STAGES == 0;
-        bMult = 1.0 + (level - 1) * 0.008;      // сложность растёт с уровнем
+        bMult = 1.0 + (level - 1) * 0.012;      // более заметный рост сложности
         pMax = 300 + 60 * upg[5];
         pHp = pMax;
         pShield = 0; shieldTurns = 0;
-        eMax = 100 + level * 8 + (bBoss ? 150 : 0);
+        // Вражеский замок крепче: победа требует осмысленного продвижения армии.
+        eMax = 240 + level * 18 + (bBoss ? 320 : 0) + ((level % STAGES == 5) ? 120 : 0);
         eHp = eMax;
         mana = START_MANA; turn = 1; selCard = -1; status = ""; floats.clear();
         units.clear(); log.clear();
         int k = (level - 1) / STAGES;
-        if (level % STAGES == 5) spawnBoss((k + 1) % 4, 1, 1.0);          // мини-босс на 5-м этапе
+        if (level % STAGES == 4) {
+            status = "Событие: разведывательная засада! Готовьтесь к подкреплениям.";
+            for (int i = 0; i < 2; i++) spawnEnemy(i, i, false);
+        }
+        if (level % STAGES == 5) {
+            status = "Событие: осада крепости! Мини-босс и усиленный замок.";
+            spawnBoss((k + 1) % 4, 1, 1.0);
+        }
+        if (level % STAGES == 7) {
+            status = "Событие: вражеский конвой! Несколько линий атакованы.";
+            for (int lane = 0; lane < LANES; lane += 2) spawnEnemy(1, lane, false);
+        }
         if (bBoss) {
-            spawnBoss(k % 4, 2, 1.6);                                       // главный босс на 10-м этапе
-            if (k % 5 == 4) spawnBoss((k + 2) % 4, 0, 1.6);                 // каждое 5-е королевство: два босса
+            status = "Событие: битва за столицу! Главный босс.";
+            spawnBoss(k % 4, 2, 1.8);
+            if (k % 5 == 4) spawnBoss((k + 2) % 4, 0, 1.8);
         }
         scene = BATTLE;
         updateMusic();
-        scheduleAuto(800);
+        postInvalidate();
+        scheduleAuto(900);
     }
 
     Unit unitAt(int lane, int col) {
@@ -1152,18 +1168,25 @@ class Game extends View {
         turn++;
         status = "";
         checkEnd();
+        postInvalidate();
+        if (scene == BATTLE && auto) scheduleAuto(900);
     }
 
     void spawnWave() {
-        int attempts = 1 + bLevel / 80 + turn / 6;
-        double chance = Math.min(0.95, 0.35 + bLevel * 0.0008 + turn * 0.01);
-        if (bBoss && turn % 5 == 0) spawnBoss(bossType(), rnd.nextInt(LANES), 1.0);
-        int maxTier = Math.min(2, (bLevel - 1) / 50);
+        // Больше врагов и постепенное открытие высоких тиров, включая драконов.
+        int attempts = Math.min(9, 2 + bLevel / 35 + turn / 4);
+        double chance = Math.min(0.96, 0.48 + bLevel * 0.001 + turn * 0.012);
+        if (bBoss && turn % 4 == 0 && enemyCount() < 18)
+            spawnBoss(bossType(), rnd.nextInt(LANES), 1.0 + turn * 0.01);
+        int maxTier = Math.min(3, (bLevel - 1) / 25);
         List<Integer> pool = new ArrayList<>();
-        for (int t = 0; t < 4; t++) if (EN_TIER[t] <= maxTier) pool.add(t);
-        for (int i = 0; i < attempts; i++)
+        for (int t = 0; t < EN_NAME.length; t++) if (EN_TIER[t] <= maxTier) pool.add(t);
+        for (int i = 0; i < attempts && enemyCount() < 18; i++) {
             if (rnd.nextDouble() < chance)
                 spawnEnemy(pool.get(rnd.nextInt(pool.size())), rnd.nextInt(LANES), false);
+        }
+        if (bLevel % STAGES == 4 && turn % 3 == 0 && enemyCount() < 18)
+            spawnEnemy(0, rnd.nextInt(LANES), false);
     }
 
     void act(Unit u) {
