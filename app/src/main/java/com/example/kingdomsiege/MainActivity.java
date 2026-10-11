@@ -126,13 +126,13 @@ class Game extends View {
     static final int[] UNIT_SPEED = {1, 1, 2, 1, 1};
 
     // враги
-    static final String[] EN_NAME = {"Гоблин-лучник", "Орк", "Тролль", "Тёмный маг", "Дракон"};
-    static final String[] EN_ART = {"enemy_gob", "enemy_orc", "enemy_troll", "enemy_dark", "enemy_dragon"};
-    static final int[] EN_HP = {60, 90, 180, 70, 300};
-    static final int[] EN_DMG = {18, 12, 35, 45, 70};
-    static final int[] EN_RANGE = {4, 1, 1, 3, 2};
-    static final int[] EN_SPEED = {1, 1, 1, 1, 2};
-    static final int[] EN_TIER = {0, 1, 2, 2, 3};
+    static final String[] EN_NAME = {"Гоблин-лучник", "Орк", "Тролль", "Тёмный маг", "Дракон", "Ядовитый убийца", "Каменный голем", "Адский рыцарь"};
+    static final String[] EN_ART = {"enemy_gob", "enemy_orc", "enemy_troll", "enemy_dark", "enemy_dragon", "enemy_assassin", "enemy_golem", "enemy_hellknight"};
+    static final int[] EN_HP = {60, 90, 180, 70, 300, 85, 260, 210};
+    static final int[] EN_DMG = {18, 12, 35, 45, 70, 32, 28, 42};
+    static final int[] EN_RANGE = {4, 1, 1, 3, 2, 1, 1, 1};
+    static final int[] EN_SPEED = {1, 1, 1, 1, 2, 2, 1, 1};
+    static final int[] EN_TIER = {0, 1, 2, 2, 3, 1, 2, 2};
 
     // боссы: 0 дракон (огонь по линии), 1 тролль-вождь (регенерация), 2 тёмный лорд (призыв), 3 орк-вождь (ярость)
     static final String[] BOSS_NAME = {"Дракон", "Тролль-вождь", "Тёмный лорд", "Орк-вождь"};
