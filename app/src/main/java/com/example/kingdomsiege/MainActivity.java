@@ -3,6 +3,10 @@ package com.example.kingdomsiege;
 import android.app.Activity;
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.content.res.AssetFileDescriptor;
+import android.media.AudioAttributes;
+import android.media.MediaPlayer;
+import android.media.SoundPool;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
@@ -29,14 +33,74 @@ public class MainActivity extends Activity {
     }
 }
 
+final class Audio {
+    private final Context ctx;
+    private final SoundPool pool;
+    private final Map<String, Integer> sfx = new HashMap<>();
+    private MediaPlayer music;
+    private String musicName = "";
+    boolean sfxOn = true, musicOn = true;
+
+    Audio(Context ctx) {
+        this.ctx = ctx;
+        AudioAttributes attrs = new AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_GAME)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build();
+        pool = new SoundPool.Builder().setMaxStreams(10).setAudioAttributes(attrs).build();
+        String[] names = {"sfx_hit", "sfx_castle", "sfx_summon", "sfx_spell", "sfx_die",
+                          "sfx_heal", "sfx_win", "sfx_lose", "sfx_click", "sfx_boss"};
+        for (String n : names) {
+            try (AssetFileDescriptor afd = ctx.getAssets().openFd(n + ".wav")) {
+                sfx.put(n, pool.load(afd, 1));
+            } catch (IOException ignored) { }
+        }
+    }
+
+    void play(String n) {
+        Integer id = sfx.get(n);
+        if (sfxOn && id != null) pool.play(id, 0.8f, 0.8f, 1, 0, 1f);
+    }
+
+    void music(String name) {
+        if (name.equals(musicName)) return;
+        stopMusic();
+        musicName = name;
+        if (!musicOn) return;
+        try (AssetFileDescriptor afd = ctx.getAssets().openFd(name + ".wav")) {
+            music = new MediaPlayer();
+            music.setDataSource(afd.getFileDescriptor(), afd.getStartOffset(), afd.getLength());
+            music.setLooping(true);
+            music.setVolume(0.35f, 0.35f);
+            music.prepare();
+            music.start();
+        } catch (IOException e) {
+            music = null;
+        }
+    }
+
+    void stopMusic() {
+        if (music != null) {
+            try { music.stop(); } catch (IllegalStateException ignored) { }
+            music.release();
+            music = null;
+        }
+        musicName = "";
+    }
+
+    void release() {
+        stopMusic();
+        pool.release();
+    }
+}
+
 class Game extends View {
     // сцены
-    static final int MENU = 0, MAP = 1, KINGDOM = 2, COLLECTION = 3, SETTINGS = 4, BATTLE = 5, RESULT = 6;
+    static final int MENU = 0, MAP = 1, KINGDOM = 2, COLLECTION = 3, SETTINGS = 4, BATTLE = 5, RESULT = 6, REWARDS = 7;
 
-    static final int LANES = 5, COLS = 14, MAX_MANA = 10, STAGES = 10, KINGDOMS = 50, MAX_STARS_LEVEL = 2000;
+    static final int LANES = 5, COLS = 14, MAX_MANA = 15, START_MANA = 5, STAGES = 10, KINGDOMS = 50, MAX_STARS_LEVEL = 2000;
     static final int DRAGON = 4;
 
-    static final float LANE_TOP = 0.11f, LANE_BOT = 0.70f, LOG_Y = 0.715f, STATUS_Y = 0.765f, HAND_Y = 0.80f;
+    static final float LOG_Y = 0.72f, STATUS_Y = 0.77f, HAND_Y = 0.80f;
 
     // ---- данные из концепт-картинки ----
     static final String[] THEME_NAMES = {
@@ -70,11 +134,107 @@ class Game extends View {
     static final int[] EN_SPEED = {1, 1, 1, 1, 2};
     static final int[] EN_TIER = {0, 1, 2, 2, 3};
 
+    // боссы: 0 дракон (огонь по линии), 1 тролль-вождь (регенерация), 2 тёмный лорд (призыв), 3 орк-вождь (ярость)
+    static final String[] BOSS_NAME = {"Дракон", "Тролль-вождь", "Тёмный лорд", "Орк-вождь"};
+    static final String[] BOSS_ART = {"enemy_dragon", "enemy_troll", "enemy_dark", "enemy_orc"};
+    static final int[] BOSS_HP = {300, 500, 350, 400};
+    static final int[] BOSS_DMG = {70, 50, 45, 60};
+    static final int[] BOSS_RANGE = {2, 1, 3, 1};
+    static final int[] BOSS_SPEED = {2, 1, 1, 1};
+
+    // эффекты
+    static final class Particle {
+        float x, y, vx, vy; int life; int color;
+    }
+    final List<Particle> particles = new ArrayList<>();
+    int shake = 0, flash = 0;
+    Audio audio;
+
+    static final class FloatText {
+        float x, y; String s; int color; int life;
+        FloatText(float x, float y, String s, int color) { this.x = x; this.y = y; this.s = s; this.color = color; this.life = 40; }
+    }
+    final List<FloatText> floats = new ArrayList<>();
+
+    // ---- авто-режим: бой идёт сам ----
+    boolean auto = true;
+    final Runnable autoTick = new Runnable() {
+        @Override
+        public void run() { autoTurn(); }
+    };
+
+    void scheduleAuto(long delay) {
+        removeCallbacks(autoTick);
+        if (auto && scene == BATTLE) postDelayed(autoTick, delay);
+    }
+
+    void autoTurn() {
+        if (scene != BATTLE || !auto) return;
+        int guard = 0;
+        while (guard++ < 10 && autoPlayOne()) { }
+        endTurn();
+        scheduleAuto(700);
+    }
+
+    int enemyCountInLane(int lane) {
+        int n = 0;
+        for (Unit u : units) if (u.alive() && !u.player && u.lane == lane) n++;
+        return n;
+    }
+
+    int nearestEnemyCol(int lane) {
+        int best = COLS;
+        for (Unit u : units) if (u.alive() && !u.player && u.lane == lane && u.col < best) best = u.col;
+        return best;
+    }
+
+    int freeLaneForSummon() {
+        int bestLane = -1, bestOur = Integer.MAX_VALUE;
+        for (int lane = 0; lane < LANES; lane++) {
+            if (occupied(lane, 0)) continue;
+            int our = 0;
+            for (Unit u : units) if (u.alive() && u.player && u.lane == lane) our++;
+            if (our < bestOur) { bestOur = our; bestLane = lane; }
+        }
+        return bestLane;
+    }
+
+    // одно разумное действие ИИ; возвращает true, если карта разыграна
+    boolean autoPlayOne() {
+        int enemies = 0, lanesEnemy = 0;
+        for (Unit u : units) if (u.alive() && !u.player) enemies++;
+        boolean nearCastle = false;
+        for (Unit u : units) if (u.alive() && !u.player && u.col <= 3) nearCastle = true;
+
+        if (pHp < pMax / 2 && mana >= CARD_COST[7]) { playCard(7, 0); return true; }
+        if (pShield == 0 && nearCastle && mana >= CARD_COST[6]) { playCard(6, 0); return true; }
+
+        int bestLane = -1, bestCount = 0;
+        for (int lane = 0; lane < LANES; lane++) {
+            int n = enemyCountInLane(lane);
+            if (n > bestCount) { bestCount = n; bestLane = lane; }
+        }
+        if (bestLane >= 0) {
+            if (bestCount >= 2 && mana >= CARD_COST[5]) { playCard(5, bestLane); return true; }
+            if (nearestEnemyCol(bestLane) <= 6 && mana >= CARD_COST[3]) { playCard(3, bestLane); return true; }
+        }
+        if (enemies >= 4 && mana >= CARD_COST[4]) { playCard(4, 0); return true; }
+
+        int lane = freeLaneForSummon();
+        if (lane >= 0) {
+            if (mana >= CARD_COST[2]) { playCard(2, lane); return true; }
+            if (mana >= CARD_COST[1]) { playCard(1, lane); return true; }
+            if (mana >= CARD_COST[0]) { playCard(0, lane); return true; }
+        }
+        return false;
+    }
+
     static final class Unit {
         boolean player;
         int type;
         String name, art;
         int lane, col, hp, maxHp, dmg, range, speed;
+        boolean boss; int bt;
         boolean alive() { return hp > 0; }
     }
 
@@ -84,7 +244,9 @@ class Game extends View {
     final Map<String, Bitmap> cache = new HashMap<>();
 
     int scene = MENU;
-    int unlocked = 1, gold = 0;
+    int unlocked = 1, gold = 0, totalWins = 0, dailyStreak = 0;
+    String lastDaily = "";
+    boolean[] claimedAchievements = new boolean[4];
     int[] upg = new int[6];
     int[] stars = new int[MAX_STARS_LEVEL + 1];
     int curK = 0;
@@ -105,6 +267,7 @@ class Game extends View {
     Game(Context ctx) {
         super(ctx);
         prefs = ctx.getSharedPreferences("kingdom", Context.MODE_PRIVATE);
+        audio = new Audio(ctx);
         load();
     }
 
@@ -113,6 +276,12 @@ class Game extends View {
         try {
             unlocked = prefs.getInt("unlocked", 1);
             gold = prefs.getInt("gold", 0);
+            audio.sfxOn = prefs.getBoolean("sfx", true);
+            audio.musicOn = prefs.getBoolean("music", true);
+            totalWins = prefs.getInt("totalWins", 0);
+            dailyStreak = prefs.getInt("dailyStreak", 0);
+            lastDaily = prefs.getString("lastDaily", "");
+            for (int i = 0; i < claimedAchievements.length; i++) claimedAchievements[i] = prefs.getBoolean("achievement" + i, false);
             String[] up = prefs.getString("upg", "0,0,0,0,0,0").split(",");
             for (int i = 0; i < 6 && i < up.length; i++) upg[i] = Integer.parseInt(up[i]);
             String s = prefs.getString("stars", "");
@@ -133,8 +302,12 @@ class Game extends View {
         StringBuilder st = new StringBuilder();
         for (int i = 1; i < stars.length; i++)
             if (stars[i] > 0) st.append(i).append(':').append(stars[i]).append(',');
-        prefs.edit().putInt("unlocked", unlocked).putInt("gold", gold)
-             .putString("upg", up.toString()).putString("stars", st.toString()).apply();
+        SharedPreferences.Editor editor = prefs.edit().putInt("unlocked", unlocked).putInt("gold", gold)
+             .putString("upg", up.toString()).putString("stars", st.toString())
+             .putBoolean("sfx", audio.sfxOn).putBoolean("music", audio.musicOn)
+             .putInt("totalWins", totalWins).putInt("dailyStreak", dailyStreak).putString("lastDaily", lastDaily);
+        for (int i = 0; i < claimedAchievements.length; i++) editor.putBoolean("achievement" + i, claimedAchievements[i]);
+        editor.apply();
     }
 
     // ================= мир =================
@@ -238,6 +411,11 @@ class Game extends View {
 
     @Override
     protected void onDraw(Canvas c) {
+        c.save();
+        if (shake > 0) {
+            c.translate((rnd.nextFloat() - 0.5f) * shake * 2, (rnd.nextFloat() - 0.5f) * shake * 2);
+            shake--;
+        }
         c.drawColor(Color.rgb(18, 20, 28));
         switch (scene) {
             case MENU: drawMenu(c); break;
@@ -245,13 +423,58 @@ class Game extends View {
             case KINGDOM: drawKingdom(c); break;
             case COLLECTION: drawCollection(c); break;
             case SETTINGS: drawSettings(c); break;
+            case REWARDS: drawRewards(c); break;
             case BATTLE: drawBattle(c); break;
             default: drawResult(c); break;
         }
+        if (scene == BATTLE) drawFx(c);
+        c.restore();
+        if (shake > 0 || flash > 0 || !particles.isEmpty()) postInvalidateDelayed(16);
+    }
+
+    void drawFx(Canvas c) {
+        if (flash > 0) {
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(Color.argb(Math.min(255, flash), 255, 255, 255));
+            c.drawRect(0, 0, getWidth(), getHeight(), paint);
+            flash -= 14;
+        }
+        for (int i = particles.size() - 1; i >= 0; i--) {
+            Particle p = particles.get(i);
+            p.x += p.vx; p.y += p.vy; p.vy += 0.35f; p.life--;
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(Color.argb(Math.max(0, Math.min(255, p.life * 8)),
+                    Color.red(p.color), Color.green(p.color), Color.blue(p.color)));
+            c.drawCircle(p.x, p.y, 3 + p.life * 0.08f, paint);
+            if (p.life <= 0) particles.remove(i);
+        }
+    }
+
+    void spawnBurst(int lane, int col, int color, int n) {
+        float x = cellCX(col), y = cellCY(lane, col);
+        for (int i = 0; i < n; i++) {
+            Particle p = new Particle();
+            p.x = x; p.y = y;
+            p.vx = (rnd.nextFloat() - 0.5f) * 10;
+            p.vy = (rnd.nextFloat() - 1.2f) * 6;
+            p.life = 30 + rnd.nextInt(15);
+            p.color = color;
+            particles.add(p);
+        }
+    }
+
+    void updateMusic() {
+        if (audio != null) audio.music(scene == BATTLE ? "music_battle" : "music_menu");
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        super.onDetachedFromWindow();
+        audio.release();
     }
 
     // ---------- главное меню (как лобби на картинке) ----------
-    static final String[] MENU_LABELS = {"Играть (карта мира)", "Продолжить: уровень ", "Коллекция карт", "Настройки", "Выход"};
+    static final String[] MENU_LABELS = {"Играть (карта мира)", "Продолжить: уровень ", "Коллекция карт", "Награды и задания", "Настройки"};
 
     RectF menuBtn(int i) {
         float top = 0.42f + i * 0.095f;
@@ -388,6 +611,56 @@ class Game extends View {
         button(c, castleBtn(), "Укрепление замка: ур." + upg[5] + " (+60 HP), цена " + cost, Color.rgb(60, 90, 160));
     }
 
+    // ---------- ежедневные награды и достижения ----------
+    RectF dailyBtn() { return fr(0.08f, 0.25f, 0.92f, 0.34f); }
+    RectF achievementBtn(int i) { return fr(0.08f, 0.43f + i * 0.115f, 0.92f, 0.515f + i * 0.115f); }
+
+    String todayStamp() {
+        return new java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(new java.util.Date());
+    }
+
+    boolean dailyAvailable() { return !todayStamp().equals(lastDaily); }
+
+    void claimDailyReward() {
+        if (!dailyAvailable()) return;
+        String today = todayStamp();
+        String yesterday = new java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US)
+                .format(new java.util.Date(System.currentTimeMillis() - 86400000L));
+        dailyStreak = yesterday.equals(lastDaily) ? Math.min(7, dailyStreak + 1) : 1;
+        int reward = 40 + dailyStreak * 10;
+        gold += reward;
+        lastDaily = today;
+        status = "Ежедневная награда: +" + reward;
+        save();
+    }
+
+    int achievementTarget(int i) { return new int[]{1, 5, 15, 50}[i]; }
+    int achievementReward(int i) { return new int[]{50, 120, 300, 1000}[i]; }
+
+    void claimAchievement(int i) {
+        if (i < 0 || i >= claimedAchievements.length || claimedAchievements[i] || totalWins < achievementTarget(i)) return;
+        claimedAchievements[i] = true;
+        gold += achievementReward(i);
+        status = "Достижение получено: +" + achievementReward(i) + " монет";
+        save();
+    }
+
+    void drawRewards(Canvas c) {
+        float w = getWidth(), h = getHeight();
+        drawCover(c, "lobby_bg", 100); dim(c, 205); backButton(c);
+        text(c, "НАГРАДЫ И ЗАДАНИЯ", w / 2f, h * 0.15f, h * 0.032f, Color.rgb(255, 215, 110), Paint.Align.CENTER);
+        text(c, "Побед: " + totalWins + "     Монеты: " + gold, w / 2f, h * 0.205f, h * 0.024f, Color.WHITE, Paint.Align.CENTER);
+        String dailyText = dailyAvailable() ? "Забрать ежедневный бонус (серия " + dailyStreak + ")" : "Ежедневный бонус уже получен";
+        button(c, dailyBtn(), dailyText, dailyAvailable() ? Color.rgb(45, 125, 75) : Color.rgb(65, 65, 75));
+        String[] names = {"Первая победа", "5 побед", "15 побед", "50 побед"};
+        for (int i = 0; i < 4; i++) {
+            String state = claimedAchievements[i] ? "Получено" : (totalWins >= achievementTarget(i) ? "Забрать" : totalWins + "/" + achievementTarget(i));
+            button(c, achievementBtn(i), names[i] + " · " + state + " · +" + achievementReward(i),
+                    claimedAchievements[i] ? Color.rgb(55, 65, 70) : (totalWins >= achievementTarget(i) ? Color.rgb(125, 90, 25) : Color.rgb(45, 55, 80)));
+        }
+        text(c, "Бонус доступен раз в календарный день", w / 2f, h * 0.93f, h * 0.02f, Color.LTGRAY, Paint.Align.CENTER);
+    }
+
     // ---------- настройки ----------
     void drawSettings(Canvas c) {
         float w = getWidth(), h = getHeight();
@@ -396,7 +669,7 @@ class Game extends View {
         backButton(c);
         text(c, "НАСТРОЙКИ", w / 2f, h * 0.20f, h * 0.036f, Color.rgb(255, 215, 110), Paint.Align.CENTER);
         String[] lines = {
-            "Версия 1.0",
+            "Версия 1.4 — Королевское обновление",
             "Игра работает офлайн, интернет не нужен",
             "Прогресс сохраняется на телефоне",
             "500 уровней: 50 королевств по 10 этапов",
@@ -405,17 +678,30 @@ class Game extends View {
         };
         for (int i = 0; i < lines.length; i++)
             text(c, lines[i], w / 2f, h * (0.30f + i * 0.06f), h * 0.024f, Color.WHITE, Paint.Align.CENTER);
+        button(c, sfxBtn(), "Звуки эффектов: " + (audio.sfxOn ? "ВКЛ" : "ВЫКЛ"), Color.rgb(60, 90, 160));
+        button(c, musicBtn(), "Музыка: " + (audio.musicOn ? "ВКЛ" : "ВЫКЛ"), Color.rgb(60, 90, 160));
     }
 
+    RectF sfxBtn() { return fr(0.10f, 0.66f, 0.90f, 0.735f); }
+    RectF musicBtn() { return fr(0.10f, 0.76f, 0.90f, 0.835f); }
+
     // ---------- бой ----------
-    float cellX0() { return getWidth() * 0.15f; }
-    float cellW() { return getWidth() * 0.70f / COLS; }
-    float cellCX(int col) { return cellX0() + cellW() * (col + 0.5f); }
-    float laneH() { return (LANE_BOT - LANE_TOP) / LANES * getHeight(); }
+    // ---- перспектива: col 0 — близко к нашему замку, col COLS-1 — далеко у врага ----
+    float depthT(int col) { return col / (float) (COLS - 1); }
+    float horizonY() { return getHeight() * 0.10f; }
+    float laneNearY(int lane) { return getHeight() * (0.34f + lane * 0.07f); }
+    float laneFarY(int lane) { return horizonY() + (laneNearY(lane) - horizonY()) * 0.45f; }
+    float cellCX(int col) { return getWidth() * (0.16f + 0.70f * depthT(col)); }
+    float cellCY(int lane, int col) {
+        float t = depthT(col);
+        return laneNearY(lane) + (laneFarY(lane) - laneNearY(lane)) * t;
+    }
+    float scaleAt(int col) { return 1f - 0.5f * depthT(col); }
+    float bandNear() { return getHeight() * 0.075f; }
 
     RectF laneRect(int i) {
-        float lh = (LANE_BOT - LANE_TOP) / LANES;
-        return fr(0f, LANE_TOP + i * lh, 1f, LANE_TOP + (i + 1) * lh);
+        float y = laneFarY(i) - bandNear() * 0.6f, y2 = laneNearY(i) + bandNear() * 0.6f;
+        return new RectF(0, y, getWidth(), y2);
     }
 
     RectF cardRect(int i) {
@@ -433,48 +719,74 @@ class Game extends View {
     void drawBattle(Canvas c) {
         float w = getWidth(), h = getHeight();
         drawCover(c, "lvl_" + (THEME_PIC[((bLevel - 1) / STAGES) % 10] + 1), 150);
-        dim(c, 150);
+        dim(c, 130);
 
         int k = (bLevel - 1) / STAGES;
         int stage = (bLevel - 1) % STAGES + 1;
         text(c, "Ур." + bLevel + " " + kingdomName(k) + " — этап " + stage + (bBoss ? " БОСС" : ""),
                 8, h * 0.035f, h * 0.024f, Color.WHITE, Paint.Align.LEFT);
         text(c, "Замок " + Math.max(0, pHp) + "/" + pMax + (pShield > 0 ? " (щит " + pShield + ")" : "")
-                + "   Враг " + Math.max(0, eHp) + "/" + eMax + "   Мана " + mana + "/" + MAX_MANA + "  Ход " + turn,
-                8, h * 0.08f, h * 0.022f, Color.LTGRAY, Paint.Align.LEFT);
+                + "   Враг " + Math.max(0, eHp) + "/" + eMax + "   Ход " + turn,
+                8, h * 0.075f, h * 0.022f, Color.LTGRAY, Paint.Align.LEFT);
+        drawManaBar(c, w, h);
 
-        // замки
-        RectF lc = fr(0f, LANE_TOP, 0.13f, LANE_BOT);
+        // пол: трапеции лайнов, сужающиеся к горизонту
+        float x0 = cellCX(0) - w * 0.04f, xF = cellCX(COLS - 1);
+        for (int i = 0; i < LANES; i++) {
+            float yN = laneNearY(i), yF = laneFarY(i);
+            float bN = bandNear(), bF = bN * 0.45f;
+            android.graphics.Path p = new android.graphics.Path();
+            p.moveTo(x0, yN - bN);
+            p.lineTo(xF, yF - bF);
+            p.lineTo(xF, yF + bF);
+            p.lineTo(x0, yN + bN);
+            p.close();
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(i % 2 == 0 ? Color.argb(150, 52, 70, 48) : Color.argb(150, 60, 56, 40));
+            c.drawPath(p, paint);
+        }
+
+        // замки (близкий слева, дальний справа)
+        float bN = bandNear();
+        RectF lc = new RectF(0f, laneFarY(0) - bN * 0.5f, w * 0.10f, laneNearY(LANES - 1) + bN);
         box(c, lc, Color.rgb(40, 90, 180));
         text(c, "Я", lc.centerX(), lc.centerY(), h * 0.03f, Color.WHITE, Paint.Align.CENTER);
-        RectF rc = fr(0.87f, LANE_TOP, 1f, LANE_BOT);
+        RectF rc = new RectF(w * 0.90f, laneFarY(0) - bN * 0.5f, w, laneFarY(LANES - 1) + bN * 0.4f);
         box(c, rc, Color.rgb(170, 40, 40));
         text(c, "В", rc.centerX(), rc.centerY(), h * 0.03f, Color.WHITE, Paint.Align.CENTER);
 
-        float cw = cellW();
-        float lh = laneH();
-        for (int i = 0; i < LANES; i++) {
-            RectF lr = laneRect(i);
-            paint.setStyle(Paint.Style.FILL);
-            paint.setColor(Color.argb(120, 30, 34, 48));
-            c.drawRect(cellX0(), lr.top + 2, w * 0.86f, lr.bottom - 2, paint);
-            for (int col = 0; col < COLS; col++) {
+        // юниты в глубину: дальние рисуются первыми
+        for (int col = COLS - 1; col >= 0; col--) {
+            float s = scaleAt(col);
+            for (int i = 0; i < LANES; i++) {
                 Unit u = unitAt(i, col);
-                float cx = cellCX(col), cy = lr.centerY();
-                if (u == null) {
-                    paint.setColor(Color.argb(160, 90, 95, 115));
-                    c.drawCircle(cx, cy, 2.5f, paint);
-                } else {
-                    drawFit(c, u.art, cx, cy - lh * 0.06f, cw * 1.05f, lh * 0.82f);
-                    float barW = cw * 0.8f;
-                    float frac = Math.max(0, u.hp) / (float) u.maxHp;
-                    paint.setColor(Color.rgb(60, 30, 30));
-                    c.drawRect(cx - barW / 2, cy + lh * 0.36f, cx + barW / 2, cy + lh * 0.36f + 4, paint);
-                    paint.setColor(u.player ? Color.rgb(90, 220, 110) : Color.rgb(240, 80, 70));
-                    c.drawRect(cx - barW / 2, cy + lh * 0.36f, cx - barW / 2 + barW * frac, cy + lh * 0.36f + 4, paint);
-                }
+                if (u == null) continue;
+                float cx = cellCX(col), cy = cellCY(i, col);
+                float sz = h * 0.075f * s;
+                // тень
+                paint.setStyle(Paint.Style.FILL);
+                paint.setColor(Color.argb(110, 0, 0, 0));
+                c.drawOval(new RectF(cx - sz * 0.35f, cy - sz * 0.05f, cx + sz * 0.35f, cy + sz * 0.12f), paint);
+                drawFit(c, u.art, cx, cy - sz * 0.5f, sz * 0.95f, sz * 1.25f);
+                // полоска HP
+                float barW = sz * 0.7f;
+                float frac = Math.max(0, u.hp) / (float) u.maxHp;
+                paint.setColor(Color.rgb(60, 30, 30));
+                c.drawRect(cx - barW / 2, cy + sz * 0.16f, cx + barW / 2, cy + sz * 0.16f + 4, paint);
+                paint.setColor(u.player ? Color.rgb(90, 220, 110) : Color.rgb(240, 80, 70));
+                c.drawRect(cx - barW / 2, cy + sz * 0.16f, cx - barW / 2 + barW * frac, cy + sz * 0.16f + 4, paint);
             }
         }
+
+        // всплывающий урон
+        boolean anim = !floats.isEmpty();
+        for (int i = floats.size() - 1; i >= 0; i--) {
+            FloatText f = floats.get(i);
+            text(c, f.s, f.x, f.y - (40 - f.life) * 1.6f, h * 0.026f, f.color, Paint.Align.CENTER);
+            f.life--;
+            if (f.life <= 0) floats.remove(i);
+        }
+        if (anim) postInvalidateDelayed(16);
 
         int from = Math.max(0, log.size() - 2);
         float ly = h * LOG_Y;
@@ -505,6 +817,21 @@ class Game extends View {
 
         button(c, endBtn(), "Конец хода", Color.rgb(50, 130, 70));
         button(c, surBtn(), "Сдаться", Color.rgb(130, 50, 50));
+        button(c, autoBtn(), auto ? "АВТО: ВКЛ" : "АВТО: ВЫКЛ", auto ? Color.rgb(40, 110, 170) : Color.rgb(90, 90, 100));
+    }
+
+    RectF autoBtn() { return fr(0.74f, 0.0f, 0.99f, 0.045f); }
+
+    // полоска маны: кристаллы, до MAX_MANA штук
+    void drawManaBar(Canvas c, float w, float h) {
+        float top = h * 0.105f, slotW = w * 0.8f / MAX_MANA;
+        for (int i = 0; i < MAX_MANA; i++) {
+            RectF r = new RectF(8 + i * slotW + 2, top, 8 + (i + 1) * slotW - 2, top + h * 0.014f);
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(i < mana ? Color.rgb(90, 170, 255) : Color.rgb(40, 50, 70));
+            c.drawRoundRect(r, 4, 4, paint);
+        }
+        text(c, "Мана " + mana + "/" + MAX_MANA, w * 0.84f, top + h * 0.012f, h * 0.02f, Color.rgb(160, 210, 255), Paint.Align.LEFT);
     }
 
     void drawResult(Canvas c) {
@@ -537,7 +864,8 @@ class Game extends View {
                 invalidate();
                 return true;
             case MotionEvent.ACTION_UP:
-                if (!moved) handleTap(x, y);
+                if (!moved) { audio.play("sfx_click"); handleTap(x, y); }
+                updateMusic();
                 invalidate();
                 return true;
             default:
@@ -554,8 +882,8 @@ class Game extends View {
                         if (i == 0) { scene = MAP; scrollY = 0; }
                         else if (i == 1) startBattle(unlocked);
                         else if (i == 2) scene = COLLECTION;
-                        else if (i == 3) scene = SETTINGS;
-                        else ((Activity) getContext()).finish();
+                        else if (i == 3) scene = REWARDS;
+                        else scene = SETTINGS;
                         return;
                     }
                 }
@@ -584,7 +912,22 @@ class Game extends View {
                 if (castleBtn().contains(x, y)) buyUpgrade(5);
                 break;
             case SETTINGS:
-                if (backBtn().contains(x, y)) scene = MENU;
+                if (backBtn().contains(x, y)) { scene = MENU; return; }
+                if (sfxBtn().contains(x, y)) { audio.sfxOn = !audio.sfxOn; save(); }
+                else if (musicBtn().contains(x, y)) {
+                    audio.musicOn = !audio.musicOn;
+                    if (!audio.musicOn) audio.stopMusic();
+                    save();
+                }
+                break;
+            case REWARDS:
+                if (backBtn().contains(x, y)) { scene = MENU; return; }
+                if (dailyBtn().contains(x, y)) claimDailyReward();
+                else {
+                    for (int i = 0; i < 4; i++) {
+                        if (achievementBtn(i).contains(x, y)) claimAchievement(i);
+                    }
+                }
                 break;
             case BATTLE:
                 battleTap(x, y);
@@ -605,6 +948,12 @@ class Game extends View {
     }
 
     void battleTap(float x, float y) {
+        if (autoBtn().contains(x, y)) {
+            auto = !auto;
+            if (auto) scheduleAuto(300);
+            else removeCallbacks(autoTick);
+            return;
+        }
         for (int i = 0; i < 8; i++) {
             if (cardRect(i).contains(x, y)) {
                 if (needsLane(i)) selCard = (selCard == i) ? -1 : i;
@@ -632,10 +981,17 @@ class Game extends View {
         pShield = 0; shieldTurns = 0;
         eMax = 100 + level * 8 + (bBoss ? 150 : 0);
         eHp = eMax;
-        mana = 4; turn = 1; selCard = -1; status = "";
+        mana = START_MANA; turn = 1; selCard = -1; status = ""; floats.clear();
         units.clear(); log.clear();
-        if (bBoss) spawnEnemy(DRAGON, 2, true);
+        int k = (level - 1) / STAGES;
+        if (level % STAGES == 5) spawnBoss((k + 1) % 4, 1, 1.0);          // мини-босс на 5-м этапе
+        if (bBoss) {
+            spawnBoss(k % 4, 2, 1.6);                                       // главный босс на 10-м этапе
+            if (k % 5 == 4) spawnBoss((k + 2) % 4, 0, 1.6);                 // каждое 5-е королевство: два босса
+        }
         scene = BATTLE;
+        updateMusic();
+        scheduleAuto(800);
     }
 
     Unit unitAt(int lane, int col) {
@@ -671,6 +1027,57 @@ class Game extends View {
         return true;
     }
 
+    boolean spawnBoss(int bt, int lane, double factor) {
+        if (occupied(lane, COLS - 1)) return false;
+        Unit u = new Unit();
+        u.player = false; u.boss = true; u.bt = bt;
+        u.name = BOSS_NAME[bt]; u.art = BOSS_ART[bt];
+        u.lane = lane; u.col = COLS - 1;
+        u.maxHp = u.hp = (int) (BOSS_HP[bt] * bMult * factor);
+        u.dmg = BOSS_DMG[bt]; u.range = BOSS_RANGE[bt]; u.speed = BOSS_SPEED[bt];
+        units.add(u);
+        status = "Босс: " + u.name + "!";
+        flash = 150; shake = 14;
+        audio.play("sfx_boss");
+        return true;
+    }
+
+    int bossType() { return ((bLevel - 1) / STAGES) % 4; }
+
+    // способности боссов в начале хода врага
+    void bossAbilities() {
+        for (Unit u : new ArrayList<>(units)) {
+            if (!u.alive() || !u.boss) continue;
+            if (u.bt == 1) {                                  // тролль: регенерация
+                int before = u.hp;
+                u.hp = Math.min(u.maxHp, u.hp + 25);
+                if (u.hp > before) addFloat(u.lane, u.col, "+" + (u.hp - before), Color.rgb(120, 255, 120));
+            }
+            if (u.bt == 2 && enemyCount() < 15) {             // тёмный лорд: призыв гоблинов
+                spawnEnemy(0, rnd.nextInt(LANES), false);
+                log.add(u.name + " призывает гоблина");
+            }
+            if (u.bt == 0 && turn % 3 == 0) {                 // дракон: огонь по своей линии
+                for (Unit p : units) {
+                    if (p.alive() && p.player && p.lane == u.lane) {
+                        p.hp -= 40;
+                        addFloat(p.lane, p.col, "-40", Color.rgb(255, 140, 60));
+                    }
+                }
+                log.add(u.name + " дышит огнём!");
+                audio.play("sfx_spell");
+                shake = 8;
+            }
+        }
+        cleanup();
+    }
+
+    int enemyCount() {
+        int n = 0;
+        for (Unit u : units) if (u.alive() && !u.player) n++;
+        return n;
+    }
+
     Unit nearestEnemyInLane(int lane) {
         Unit best = null;
         for (Unit u : units)
@@ -686,6 +1093,7 @@ class Game extends View {
             case 1:
             case 2:
                 ok = spawnPlayer(k, lane);
+                if (ok) audio.play("sfx_summon");
                 status = ok ? "Призван: " + UNIT_NAME[k] : "Линия у вашего замка занята.";
                 break;
             case 3: {   // Маг: 40 урона ближайшему врагу на линии
@@ -694,6 +1102,7 @@ class Game extends View {
                 else {
                     t.hp -= (int) (40 * (1 + 0.15 * upg[3]));
                     status = "Маг бьёт: " + t.name + "!";
+                    audio.play("sfx_spell");
                 }
                 break;
             }
@@ -701,19 +1110,23 @@ class Game extends View {
                 int dmg = (int) (30 * (1 + 0.15 * upg[4]));
                 for (Unit u : units) if (!u.player && u.alive()) u.hp -= dmg;
                 status = "Осадная машина: " + dmg + " по всем врагам!";
+                audio.play("sfx_spell"); shake = 10;
                 break;
             }
             case 5:     // Огненный шар: урон по линии
                 for (Unit u : units) if (!u.player && u.alive() && u.lane == lane) u.hp -= 50;
                 status = "Огненный шар на линии " + (lane + 1) + "!";
+                audio.play("sfx_spell"); shake = 6;
                 break;
             case 6:     // Защита
                 pShield = 50; shieldTurns = 5;
                 status = "Щит 50 на 5 ходов.";
+                audio.play("sfx_heal");
                 break;
             default:    // Лечение
                 pHp = Math.min(pMax, pHp + 40);
                 status = "Замок исцелён (+40).";
+                audio.play("sfx_heal");
                 break;
         }
         if (ok) { mana -= CARD_COST[k]; selCard = -1; }
@@ -726,6 +1139,7 @@ class Game extends View {
         for (Unit u : new ArrayList<>(units))
             if (u.player && u.alive()) act(u);
         cleanup();
+        bossAbilities();
         for (Unit u : new ArrayList<>(units))
             if (!u.player && u.alive()) act(u);
         cleanup();
@@ -734,15 +1148,16 @@ class Game extends View {
             shieldTurns--;
             if (shieldTurns == 0) pShield = 0;
         }
-        mana = Math.min(MAX_MANA, mana + 1);
+        mana = Math.min(MAX_MANA, mana + 1 + turn / 5);   // мана растёт быстрее с ходами
         turn++;
         status = "";
         checkEnd();
     }
 
     void spawnWave() {
-        int attempts = 1 + bLevel / 150;
-        double chance = Math.min(0.85, 0.3 + bLevel * 0.0008);
+        int attempts = 1 + bLevel / 80 + turn / 6;
+        double chance = Math.min(0.95, 0.35 + bLevel * 0.0008 + turn * 0.01);
+        if (bBoss && turn % 5 == 0) spawnBoss(bossType(), rnd.nextInt(LANES), 1.0);
         int maxTier = Math.min(2, (bLevel - 1) / 50);
         List<Integer> pool = new ArrayList<>();
         for (int t = 0; t < 4; t++) if (EN_TIER[t] <= maxTier) pool.add(t);
@@ -773,19 +1188,32 @@ class Game extends View {
             int d = Math.abs(e.col - u.col);
             if (d <= u.range && d < best) { best = d; target = e; }
         }
+        int dmg = u.dmg;
+        if (u.boss && u.bt == 3 && u.hp < u.maxHp / 2) dmg *= 2;    // орк-вождь в ярости
         if (target != null) {
-            target.hp -= u.dmg;
-            log.add(u.name + " бьёт " + target.name + " (-" + u.dmg + ")");
+            target.hp -= dmg;
+            addFloat(target.lane, target.col, "-" + dmg, Color.rgb(255, 230, 120));
+            spawnBurst(target.lane, target.col, Color.rgb(255, 240, 180), 4);
+            audio.play("sfx_hit");
+            log.add(u.name + " бьёт " + target.name + " (-" + dmg + ")");
             return true;
         }
         int castleDist = u.player ? COLS - u.col : u.col + 1;
         if (castleDist <= u.range) {
             if (u.player) {
-                eHp -= u.dmg;
-                log.add(u.name + " бьёт вражеский замок (-" + u.dmg + ")");
+                int d = u.dmg;
+                eHp -= d;
+                addFloat(u.lane, COLS - 1, "-" + d, Color.rgb(255, 230, 120));
+                audio.play("sfx_hit");
+                shake = Math.max(shake, 5);
+                log.add(u.name + " бьёт вражеский замок (-" + d + ")");
             } else {
-                damageCastle(u.dmg);
-                log.add(u.name + " бьёт ваш замок (-" + u.dmg + ")");
+                int before = pHp + pShield;
+                damageCastle(dmg);
+                addFloat(u.lane, 0, "-" + (before - (pHp + pShield)), Color.rgb(255, 90, 80));
+                audio.play("sfx_castle");
+                shake = Math.max(shake, 10);
+                log.add(u.name + " бьёт ваш замок (-" + dmg + ")");
             }
             return true;
         }
@@ -799,10 +1227,24 @@ class Game extends View {
         return true;
     }
 
-    void cleanup() {
-        for (int i = units.size() - 1; i >= 0; i--)
-            if (!units.get(i).alive()) units.remove(i);
+    void addFloat(int lane, int col, String s, int color) {
+        floats.add(new FloatText(cellCX(col), cellCY(lane, col), s, color));
     }
+
+    void cleanup() {
+        boolean died = false;
+        for (int i = units.size() - 1; i >= 0; i--) {
+            Unit u = units.get(i);
+            if (!u.alive()) {
+                spawnBurst(u.lane, u.col, u.player ? Color.rgb(120, 255, 140) : Color.rgb(255, 120, 90), u.boss ? 30 : 12);
+                if (u.boss) { flash = 150; shake = 12; }
+                died = true;
+                units.remove(i);
+            }
+        }
+        if (died) audio.play("sfx_die");
+    }
+
 
     void checkEnd() {
         if (scene != BATTLE) return;
@@ -813,7 +1255,11 @@ class Game extends View {
     void finish(boolean win) {
         scene = RESULT;
         resWin = win;
+        removeCallbacks(autoTick);
+        audio.stopMusic();
+        audio.play(win ? "sfx_win" : "sfx_lose");
         if (win) {
+            totalWins++;
             int p = pHp * 100 / pMax;
             resStars = p >= 70 ? 3 : (p >= 40 ? 2 : 1);
             resReward = 15 + bLevel / 3 + resStars * 5 + (bBoss ? 30 : 0);
